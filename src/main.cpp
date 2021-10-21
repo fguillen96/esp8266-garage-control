@@ -49,7 +49,7 @@ n2gwdZPDUNOzCG6eM3Gnd0rdAwlWfBPi7J0P61uc++cmbDQcUbOCx202ZQ==
 -----END CERTIFICATE-----
 )EOF";
 
-const char* fingerprint = "2a:9a:ba:d2:76:74:61:e5:39:39:b3:bb:80:2f:b5:07:99:5f:f3:37";//"31:e0:3b:d4:f2:63:c3:00:be:21:a4:d2:4b:c3:ab:41:69:11:75:99";
+const char* fingerprint = "2a:9a:ba:d2:76:74:61:e5:39:39:b3:bb:80:2f:b5:07:99:5f:f3:37";
 
 
 // ---------- DEFAULT SYSTEM CONFIGURATION ---------
@@ -63,6 +63,7 @@ const char* fingerprint = "2a:9a:ba:d2:76:74:61:e5:39:39:b3:bb:80:2f:b5:07:99:5f
 
 // ---------- DIGITAL OUTPUTS ----------
 #define DO_PP_RELAY    5
+#define DO_LED         2
 
 // ---------- WIFI AND MQTT CONNECTION ----------
 #define WIFI_SSID       "Trojan"
@@ -107,6 +108,7 @@ void ConnectWifi();
 bool ConnectMQTT();
 unsigned long GetEpochTime();
 void UpdateDoorStatus(bool);
+void RelayControl(bool);
 
 
 // ********************************************************************
@@ -126,9 +128,7 @@ void OnReceiveMQTT(char *topic, byte *payload, unsigned int length) {
   if (strcmp(topic, TOPIC_SUB_CONTROL) == 0) {
     if (payload[0] == '1' or payload[0] == 't') {
       DEBUGLN("PP");
-      digitalWrite(DO_PP_RELAY, HIGH);
-      relay_on = true;
-      start_time = millis();
+      RelayControl(true);
     }
   }
 
@@ -171,6 +171,8 @@ void setup() {
   #endif
 
   // ---------- PIN CONFIG ----------
+  pinMode(DO_LED, OUTPUT);
+  digitalWrite(DO_LED, HIGH);
   pinMode(DI_SENSOR_DOOR, INPUT_PULLUP);
   pinMode(DI_SENSOR_SECURITY, INPUT_PULLUP);
   pinMode(DO_PP_RELAY, OUTPUT);
@@ -217,14 +219,12 @@ void loop() {
   // TODO
   if (interrupt_flag) {
     interrupt_flag = false;
-    relay_on = true;
-    start_time = millis();
+    RelayControl(true);
   }
 
   // --------- RELAY TIMEOUT ---------
   if (relay_on && (millis() - start_time >= RELAY_TIMEOUT)) {
-    relay_on = false;
-    digitalWrite(DO_PP_RELAY, LOW);
+    RelayControl(false);
   }
 
 
@@ -255,6 +255,22 @@ void loop() {
 // ********************************************************************
 //                      LOCAL FUNCTIONS
 // ********************************************************************
+void RelayControl(bool activate) {
+  if (activate) {
+    digitalWrite(DO_PP_RELAY, HIGH);
+    digitalWrite(DO_LED, LOW);
+    relay_on = true;
+    start_time = millis();
+  }
+  else{
+    digitalWrite(DO_PP_RELAY, LOW);
+    digitalWrite(DO_LED, HIGH);
+    relay_on = false;
+  }
+  
+}
+
+
 bool ConnectMQTT() {
   String clientId = CLIENT_ID;
 
@@ -285,7 +301,7 @@ void UpdateDoorStatus(bool open) {
   if (open) doc["status"] = "open";
   else doc["status"] = "closed";
 
-  doc["timestamp"] = GetEpochTime();
+  doc["ts"] = GetEpochTime();
 
   serializeJsonPretty(doc, buffer);
   mqttClient.publish(TOPIC_PUB_DOOR, buffer, true); 
