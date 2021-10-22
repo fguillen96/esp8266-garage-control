@@ -66,8 +66,8 @@ const char* fingerprint = "2a:9a:ba:d2:76:74:61:e5:39:39:b3:bb:80:2f:b5:07:99:5f
 #define DO_LED         2
 
 // ---------- WIFI AND MQTT CONNECTION ----------
-#define WIFI_SSID       "Trojan"
-#define WIFI_PASSWORD   "ShupalaGamba69"
+//#define WIFI_SSID       "Trojan"
+//#define WIFI_PASSWORD   "ShupalaGamba69"
 #define MQTT_SERVER     "185.137.122.40"                 // MQTT server IP
 #define MQTT_PORT       8883                             // MQTT port
 #define MQTT_USERNAME   "liebre"                         // MQTT server username
@@ -90,7 +90,6 @@ X509List caCertX509(caCert);
 WiFiManager wifiManager;
 WiFiClientSecure  espClient;
 PubSubClient mqttClient(espClient);
-
 
 // --------- INTERRUPT FLAG --------
 volatile bool interrupt_flag = false;
@@ -204,17 +203,6 @@ void setup() {
 //                           LOOP
 // ********************************************************************
 void loop() {
-  // ---------- MANAGE MQTT CONNECTION (NON BLOCKING) ----------
-  static unsigned long lastReconnectAttempt = 0;
-  if (!mqttClient.connected()) {
-    if (millis() - lastReconnectAttempt > 5000) {
-      lastReconnectAttempt = millis();
-      if (ConnectMQTT()) {
-        lastReconnectAttempt = 0;
-      }
-    }
-  }
-
   // --------- SECURITY INTERRUPT SWITCH ----------
   // TODO
   if (interrupt_flag) {
@@ -244,6 +232,20 @@ void loop() {
     DEBUGLN(door_open);
     UpdateDoorStatus(door_open);
   }
+
+
+  // ---------- MANAGE MQTT CONNECTION (NON BLOCKING) ----------
+  static unsigned long lastReconnectAttempt = 0;
+  if (!mqttClient.connected()) {
+    if (millis() - lastReconnectAttempt > 5000) {
+      lastReconnectAttempt = millis();
+      if (ConnectMQTT()) {
+        lastReconnectAttempt = 0;
+        UpdateDoorStatus(door_open);
+      }
+    }
+  }
+
 
   // ---------- CONNECTION PROCESS ----------
   mqttClient.loop();
