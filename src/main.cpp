@@ -19,9 +19,11 @@
 #include <CertificateFile.h>
 
 
+
 // ---------- DEFAULT SYSTEM CONFIGURATION ---------
 #define RELAY_TIMEOUT         200
 #define SENSOR_READ_INTERVAL  500
+ADC_MODE(ADC_VCC);
 
 // ---------- DIGITAL INPUTS ----------
 #define DI_SENSOR_DOOR         4
@@ -39,13 +41,28 @@
 #define MQTT_PORT       SECRET_MQTT_PORT               // MQTT port
 #define MQTT_USERNAME   SECRET_MQTT_USERNAME           // MQTT server username
 #define MQTT_PASSWORD   SECRET_MQTT_PASSWORD           // MQTT server password
-#define CLIENT_ID       "Piter_garage"                 // MQTT client ID
 
 // ---------- MQTT TOPICS ----------
-#define TOPIC_PUB_DOOR      "garage/door"
-#define TOPIC_SUB_CONFIG    "garage/config"
-#define TOPIC_SUB_CONTROL   "garage/control"
-#define TOPIC_WILL          "garage/status"
+#define TOPIC_PUB_DOOR_INFO      "/garage/door/status"
+#define TOPIC_SUB_DOOR_CTRL      "/garage/door/control"
+#define TOPIC_SUB_CONFIG         "/config"
+#define TOPIC_PUB_DEV_STAT       "/info"
+
+// --------- WILL MESSAGE ---------
+#define WILL_MESSAGE  R"EOF("{"status": "disconnected"}")EOF"
+
+
+// ********************************************************************
+//                     FUNCTION PROTOTYPES
+// ********************************************************************
+void SendDeviceStatus();
+char* GetDeviceId();
+char* GetDeviceTopic(const char*, const char*);
+void ConnectWifi();
+bool ConnectMQTT();
+unsigned long UnixTime();
+void UpdateDoorStatus(bool);
+void RelayControl(bool);
 
 
 // ********************************************************************
@@ -60,20 +77,18 @@ PubSubClient mqttClient(espClient);
 // --------- INTERRUPT FLAG --------
 volatile bool interrupt_flag = false;
 
-
 // ---------- TIME CONTROL RELAY VARIABLES ---------
 bool relay_on = false;
 unsigned long start_time = 0;
 
+// ---------- CHIP INFO ---------
+const char* device_id = GetDeviceId();
 
-// ********************************************************************
-//                     FUNCTION PROTOTYPES
-// ********************************************************************
-void ConnectWifi();
-bool ConnectMQTT();
-unsigned long UnixTime();
-void UpdateDoorStatus(bool);
-void RelayControl(bool);
+// ---------- CHIP TOPICS STRINGS ----------
+const char* sub_topic_config = GetDeviceTopic(device_id, TOPIC_SUB_CONFIG);
+const char* sub_topic_door_ctrl = GetDeviceTopic(device_id, TOPIC_SUB_DOOR_CTRL);
+const char* pub_topic_door_stat = GetDeviceTopic(device_id, TOPIC_PUB_DOOR_INFO);
+const char* pub_topic_dev_stat =  GetDeviceTopic(device_id, TOPIC_PUB_DEV_STAT);
 
 
 // ********************************************************************
@@ -88,59 +103,46 @@ void OnReceiveMQTT(char *topic, byte *payload, unsigned int length) {
   }
   DEBUGLN();
 
-
   // ---------- FILTERING BY TOPIC ----------
-  if (strcmp(topic, TOPIC_SUB_CONTROL) == 0) {
+  if (strcmp(topic, sub_topic_door_ctrl) == 0) {
     if (payload[0] == '1' or payload[0] == 't') {
       DEBUGLN("PP");
       RelayControl(true);
     }
   }
 
-  else if (strcmp(topic, TOPIC_SUB_CONFIG) == 0) {
-
+  else if (strcmp(topic, sub_topic_config) == 0) {
     // --------- MQTT VARIABLES ----------
     StaticJsonDocument<100> doc;
     deserializeJson(doc, payload, length);
     JsonObject obj = doc.as<JsonObject>();
 
     // ---------- CHANGING SAMPLE TIME ---------
-    if (obj.containsKey("sample_time")) {
-      DEBUGLN("Sample time changed");
+    if (obj.containsKey("deviceStatus")) {
+      SendDeviceStatus(); 
     }
   }
 }
-
-
-
-// ********************************************************************
-//                      INTERRUPTS
-// ********************************************************************
-IRAM_ATTR void SecuritySwitch() {
-  if (!interrupt_flag) {
-    digitalWrite(DO_PP_RELAY, HIGH);
-    interrupt_flag = true;
-  }
-}
-
 
 
 // ********************************************************************
 //                     BOARD SETUP
 // ********************************************************************
 void setup() {
+  
   // --------- DEBUG ---------
+  wifiManager.setDebugOutput(false);
   #ifdef DEBUGGING
     Serial.begin(9600);
+    wifiManager.setDebugOutput(true);
   #endif
+
 
   // ---------- PIN CONFIG ----------
   pinMode(DO_LED, OUTPUT);
   digitalWrite(DO_LED, HIGH);
   pinMode(DI_SENSOR_DOOR, INPUT_PULLUP);
-  //pinMode(DI_SENSOR_SECURITY, INPUT_PULLUP);
   pinMode(DO_PP_RELAY, OUTPUT);
-  //attachInterrupt(digitalPinToInterrupt(DI_SENSOR_SECURITY), SecuritySwitch, FALLING);
 
 
   // --------- WIFI MANAGER CONFIG --------
@@ -152,12 +154,6 @@ void setup() {
   // --------- NTP SERVER CONFIG ---------
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
 
-    // --------- MANAGING CERTS ---------
-  //espClient.setTrustAnchors(&caCertX509);
-  //espClient.setX509Time(now());
-  //espClient.allowSelfSignedCerts();
-  //espClient.setFingerprint(fingerprint);
-  //espClient.setInsecure();
   
   // ---------- MQTT CONNECTION --------
   // Connection is done in loop (non blocking)
@@ -170,13 +166,6 @@ void setup() {
 //                           LOOP
 // ********************************************************************
 void loop() {
-  // --------- SECURITY INTERRUPT SWITCH ----------
-  // TODO
-  if (interrupt_flag) {
-    interrupt_flag = false;
-    RelayControl(true);
-  }
-
   // --------- RELAY TIMEOUT ---------
   if (relay_on && (millis() - start_time >= RELAY_TIMEOUT)) {
     RelayControl(false);
@@ -228,6 +217,22 @@ void loop() {
 // ********************************************************************
 //                      LOCAL FUNCTIONS
 // ********************************************************************
+char* GetDeviceId() {
+  uint8_t mac[6];
+  wifi_get_macaddr(STATION_IF, mac);
+  char *string = (char*)malloc(13);
+  sprintf(string, "%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return string;
+}
+
+
+char* GetDeviceTopic(const char* id, const char* topic) {
+  char *string = (char*)malloc(strlen(id) + strlen(topic) + 1);
+  strcpy(string, device_id);
+  strcat(string, topic);
+  return string;
+}
+
 void RelayControl(bool activate) {
   if (activate) {
     digitalWrite(DO_PP_RELAY, HIGH);
@@ -240,20 +245,36 @@ void RelayControl(bool activate) {
     digitalWrite(DO_LED, HIGH);
     relay_on = false;
   }
-  
 }
 
 
+void SendDeviceStatus() {
+  const int capacity = JSON_OBJECT_SIZE(7);
+  StaticJsonDocument<capacity> doc;
+  char buffer[200];
+  doc["status"] = "connected";
+  doc["id(mac)"] = device_id;
+  doc["heapFragmentation"] = ESP.getHeapFragmentation();
+  doc["freeHeap"] = ESP.getFreeHeap();
+  doc["vcc"] = ESP.getVcc();
+  doc["IP"] = WiFi.localIP();
+  doc["BSSID"] = WiFi.BSSID();
+
+  serializeJsonPretty(doc, buffer);
+  mqttClient.publish(pub_topic_dev_stat, buffer, true);
+}
+  
+
+
 bool ConnectMQTT() {
-  String clientId = CLIENT_ID;
   // Certificates to connect to server
   espClient.setTrustAnchors(&caCertX509);
 
   // Attempt to connect
-  if (mqttClient.connect(clientId.c_str(), MQTT_USERNAME, MQTT_PASSWORD, TOPIC_WILL, 1, true, "Disconnected")) {
-    mqttClient.publish(TOPIC_WILL, "Connected", true);
-    mqttClient.subscribe(TOPIC_SUB_CONFIG, 1);
-    mqttClient.subscribe(TOPIC_SUB_CONTROL, 0); 
+  if (mqttClient.connect(device_id, MQTT_USERNAME, MQTT_PASSWORD, pub_topic_dev_stat, 1, true, WILL_MESSAGE)) {
+    SendDeviceStatus();
+    mqttClient.subscribe(sub_topic_config, 1);
+    mqttClient.subscribe(sub_topic_door_ctrl, 0);
     }
 
   return mqttClient.connected();
@@ -272,7 +293,7 @@ void UpdateDoorStatus(bool open) {
   doc["ts"] = (int)time(nullptr);
 
   serializeJsonPretty(doc, buffer);
-  mqttClient.publish(TOPIC_PUB_DOOR, buffer, true); 
+  mqttClient.publish(pub_topic_door_stat, buffer, true); 
 }
 
 /* Not using this function. Wifi is managed by wifimanager library
