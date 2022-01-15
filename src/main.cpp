@@ -4,7 +4,7 @@
 // BOARD: Wemos D1 mini
 // *****************************************************************************************************
 
-#define DEBUGGING
+//#define DEBUGGING
 
 #include <debug.h>
 #include <ESP8266WiFi.h>
@@ -13,6 +13,9 @@
 #include <PubSubClient.h>         // MQTT library
 #include <ArduinoJson.h>          // JSON library
 #include <time.h>
+#include <FS.h>
+#include <LittleFS.h>
+#include <CertStoreBearSSL.h>
 
 // ---------- SENSITIVE INFORMATION --------
 #include <secrets.h>
@@ -35,12 +38,12 @@ ADC_MODE(ADC_VCC);
 #define DO_LED         2
 
 // ---------- WIFI AND MQTT CONNECTION (secrets.h) ----------
-#define WIFI_SSID       SECRET_WIFI_SSID               // WIFI SSID
-#define WIFI_PASSWORD   SECRET_WIFI_PASSWORD           // WIFI password
-#define MQTT_SERVER     SECRET_MQTT_SERVER             // MQTT server IP
-#define MQTT_PORT       SECRET_MQTT_PORT               // MQTT port
-#define MQTT_USERNAME   SECRET_MQTT_USERNAME           // MQTT server username
-#define MQTT_PASSWORD   SECRET_MQTT_PASSWORD           // MQTT server password
+#define WIFI_SSID       SECRET_WIFI_SSID                    // WIFI SSID
+#define WIFI_PASSWORD   SECRET_WIFI_PASSWORD                // WIFI password
+#define MQTT_SERVER     SECRET_MQTT_SERVER_HIVEMQ           // MQTT server IP
+#define MQTT_PORT       SECRET_MQTT_PORT                    // MQTT port
+#define MQTT_USERNAME   SECRET_MQTT_USERNAME_HIVEMQ         // MQTT server username
+#define MQTT_PASSWORD   SECRET_MQTT_PASSWORD_HIVEMQ         // MQTT server password
 
 // ---------- MQTT TOPICS ----------
 #define TOPIC_PUB_DOOR_INFO      "/garage/door/status"
@@ -49,8 +52,7 @@ ADC_MODE(ADC_VCC);
 #define TOPIC_PUB_DEV_STAT       "/info"
 
 // --------- WILL MESSAGE ---------
-#define WILL_MESSAGE  R"EOF("{"status": "disconnected"}")EOF"
-
+#define WILL_MESSAGE  R"EOF({"status": "disconnected"})EOF"
 
 // ********************************************************************
 //                     FUNCTION PROTOTYPES
@@ -63,16 +65,17 @@ bool ConnectMQTT();
 unsigned long UnixTime();
 void UpdateDoorStatus(bool);
 void RelayControl(bool);
+void ManageCerts();
 
 
 // ********************************************************************
 //                     GLOBAL VARIABLES
 // ********************************************************************
 // ---------- WIFI AND MQTT CLIENT ----------
-X509List caCertX509(caCert);
+BearSSL::CertStore certStore;
 WiFiManager wifiManager;
-WiFiClientSecure  espClient;
-PubSubClient mqttClient(espClient);
+WiFiClientSecure espClient;
+PubSubClient * mqttClient;
 
 // --------- INTERRUPT FLAG --------
 volatile bool interrupt_flag = false;
@@ -147,18 +150,24 @@ void setup() {
 
   // --------- WIFI MANAGER CONFIG --------
   WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP 
-  wifiManager.setConfigPortalBlocking(false);
+  wifiManager.setConfigPortalBlocking(true);
   wifiManager.autoConnect("LMTech");
-  //ConnectWifi();
+  
 
+  // ---------- FILESYSTEM CONFIG ---------
+  LittleFS.begin();
   // --------- NTP SERVER CONFIG ---------
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+
+  // --------- MANAGE CERTS ---------
+  ManageCerts();
 
   
   // ---------- MQTT CONNECTION --------
   // Connection is done in loop (non blocking)
-  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
-  mqttClient.setCallback(OnReceiveMQTT);
+  mqttClient-> setServer(MQTT_SERVER, MQTT_PORT);
+  mqttClient -> setCallback(OnReceiveMQTT);
 
 }
 
@@ -192,7 +201,7 @@ void loop() {
 
   // ---------- MANAGE MQTT CONNECTION (NON BLOCKING) ----------
   static unsigned long lastReconnectAttempt = 0;
-  if (!mqttClient.connected() && time(nullptr) > 1635448489) {
+  if (!mqttClient->connected() && time(nullptr) > 1635448489) {
     if (millis() - lastReconnectAttempt > 5000) {
       lastReconnectAttempt = millis();
       if (ConnectMQTT()) {
@@ -208,8 +217,7 @@ void loop() {
 
 
   // ---------- CONNECTION PROCESS ----------
-  mqttClient.loop();
-  wifiManager.process();
+  mqttClient->loop();
 }
 
 
@@ -261,23 +269,21 @@ void SendDeviceStatus() {
   doc["BSSID"] = WiFi.BSSID();
 
   serializeJsonPretty(doc, buffer);
-  mqttClient.publish(pub_topic_dev_stat, buffer, true);
+  mqttClient->publish(pub_topic_dev_stat, buffer, true);
 }
   
 
 
 bool ConnectMQTT() {
-  // Certificates to connect to server
-  espClient.setTrustAnchors(&caCertX509);
 
   // Attempt to connect
-  if (mqttClient.connect(device_id, MQTT_USERNAME, MQTT_PASSWORD, pub_topic_dev_stat, 1, true, WILL_MESSAGE)) {
+  if (mqttClient->connect(device_id, MQTT_USERNAME, MQTT_PASSWORD, pub_topic_dev_stat, 1, true, WILL_MESSAGE)) {
     SendDeviceStatus();
-    mqttClient.subscribe(sub_topic_config, 1);
-    mqttClient.subscribe(sub_topic_door_ctrl, 0);
+    mqttClient -> subscribe(sub_topic_config, 1);
+    mqttClient -> subscribe(sub_topic_door_ctrl, 0);
     }
 
-  return mqttClient.connected();
+  return mqttClient -> connected();
 }
 
 
@@ -293,28 +299,22 @@ void UpdateDoorStatus(bool open) {
   doc["ts"] = (int)time(nullptr);
 
   serializeJsonPretty(doc, buffer);
-  mqttClient.publish(pub_topic_door_stat, buffer, true); 
+  mqttClient -> publish(pub_topic_door_stat, buffer, true); 
 }
 
-/* Not using this function. Wifi is managed by wifimanager library
 
-void ConnectWifi() {
-  DEBUGLN("Connecting to ");
-  DEBUG(WIFI_SSID);
-  DEBUG(" ...");
-
-  WiFi.begin();
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    DEBUG(".");
+void ManageCerts() {
+  int numCerts = certStore.initCertStore(LittleFS, PSTR("/certs.idx"), PSTR("/certs.ar"));
+  DEBUG("Number of CA certs read: ");
+  DEBUGLN(numCerts);
+  if (numCerts == 0) {
+    DEBUGLN("No certs found. Did you run certs-from-mozilla.py and upload the LittleFS directory before running?");
+    return; // Can't connect to anything w/o certs!
   }
 
-  DEBUGLN();
-  DEBUGLN("WiFi connected");
+  BearSSL::WiFiClientSecure *bear = new BearSSL::WiFiClientSecure();
+  // Integrate the cert store with this connection
+  bear->setCertStore(&certStore);
 
-  DEBUG("IP address: ");
-  DEBUGLN(WiFi.localIP());
+  mqttClient = new PubSubClient(*bear);
 }
-
-*/
